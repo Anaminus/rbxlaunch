@@ -2,28 +2,31 @@ package main
 
 import (
 	"encoding/json"
+	"encoding/xml"
 	"flag"
 	"fmt"
-	"github.com/anaminus/rbxweb"
+	"github.com/anaminus/rbxauth"
+	"golang.org/x/crypto/ssh/terminal"
 	"io/ioutil"
 	"net/url"
 	"os"
 	"os/exec"
-	path "path/filepath"
+	"path/filepath"
 	"strconv"
+	"syscall"
 )
 
-var AllUsers = path.Join(programFiles(), `Roblox\Versions`)
-var CurrentUser = path.Join(localAppData(), `Roblox\Versions`)
+var AllUsers = filepath.Join(programFiles(), `Roblox\Versions`)
+var CurrentUser = filepath.Join(localAppData(), `Roblox\Versions`)
 var Executables = []string{"RobloxPlayerBeta.exe"}
 
 func localAppData() string {
 	lappdata := os.Getenv("LOCALAPPDATA")
 	if _, err := os.Stat(lappdata); lappdata == "" || err != nil {
 		userProfile := os.Getenv("USERPROFILE")
-		lappdata = path.Join(userProfile, `AppData\Local`)
+		lappdata = filepath.Join(userProfile, `AppData\Local`)
 		if _, err := os.Stat(lappdata); lappdata == "" || err != nil {
-			lappdata = path.Join(userProfile, `Local Settings\Application Data`)
+			lappdata = filepath.Join(userProfile, `Local Settings\Application Data`)
 		}
 	}
 	return lappdata
@@ -49,7 +52,7 @@ func findBuild(dirname string) string {
 	for _, file := range files {
 		if file.IsDir() {
 			for _, exe := range Executables {
-				exepath := path.Join(dirname, file.Name(), exe)
+				exepath := filepath.Join(dirname, file.Name(), exe)
 				if _, err := os.Stat(exepath); err == nil {
 					return exepath
 				}
@@ -59,12 +62,31 @@ func findBuild(dirname string) string {
 	return ""
 }
 
-func FindPlayer() string {
-	build := findBuild(AllUsers)
+func FindPlayer() (build, host string) {
+	build = findBuild(AllUsers)
 	if build == "" {
-		return findBuild(CurrentUser)
+		build = findBuild(CurrentUser)
 	}
-	return build
+	if build == "" {
+		return
+	}
+
+	type AppSettings struct {
+		BaseUrl string
+	}
+
+	b, err := ioutil.ReadFile(filepath.Join(filepath.Dir(build), "AppSettings.xml"))
+	if err != nil {
+		return
+	}
+	appSettings := AppSettings{}
+	err = xml.Unmarshal(b, &appSettings)
+	u, _ := url.Parse(appSettings.BaseUrl)
+	if u == nil {
+		return
+	}
+	host = u.Host
+	return
 }
 
 type GameRequest struct {
@@ -77,52 +99,66 @@ type GameRequest struct {
 
 func main() {
 	var username string
-	var password string
 	var placeID int
 
-	// Parse flags
+	// Parse flags.
 	flag.StringVar(&username, "u", "", "Username to login with.")
-	flag.StringVar(&password, "p", "", "Password to login with.")
 	flag.IntVar(&placeID, "id", 0, "ID of place to join.")
 	flag.Parse()
 
 	if placeID == 0 {
-		fmt.Fprintf(os.Stderr, "Place ID required (-id)\n")
+		fmt.Fprintf(os.Stderr, "place ID required (-id)\n")
 		return
 	}
 
-	// Find game client
-	player := FindPlayer()
+	// Find game client.
+	player, host := FindPlayer()
 	if player == "" {
-		fmt.Fprintf(os.Stderr, "Failed to locate game client. Make sure Roblox is installed.\n")
+		fmt.Fprintf(os.Stderr, "failed to locate game client. Make sure Roblox is installed.\n")
 		return
 	}
 
-	// Log in with web client
-	client := rbxweb.NewClient()
-	if username != "" && password != "" {
-		if err := client.Login(username, password); err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to log in: %s\n", err)
+	// Log in with web client.
+	client := &rbxauth.Client{}
+	if username != "" {
+		var password []byte
+		var err error
+		fmt.Print("Enter your password: ")
+		password, err = terminal.ReadPassword(int(syscall.Stdin))
+		fmt.Println()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "failed to read password: %s\n", err)
 			return
 		}
+		if err := client.Login(host, username, password); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to log in: %s\n", err)
+			return
+		}
+		copy(password, make([]byte, len(password)))
 	}
 
-	// Request game
+	// Request game.
 	gr := GameRequest{}
 	{
-		resp, err := client.Get(client.GetSecureURL("assetgame", "/game/placelauncher.ashx", url.Values{
-			"request":       []string{"RequestGame"},
-			"placeId":       []string{strconv.Itoa(placeID)},
-			"isPartyLeader": []string{"false"},
-			"gender":        []string{""},
-		}))
+		launchURL := &url.URL{
+			Scheme: "https",
+			Host:   host,
+			Path:   "/game/placelauncher.ashx",
+			RawQuery: url.Values{
+				"request":       []string{"RequestGame"},
+				"placeId":       []string{strconv.Itoa(placeID)},
+				"isPartyLeader": []string{"false"},
+				"gender":        []string{""},
+			}.Encode(),
+		}
+		resp, err := client.Get(launchURL.String())
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to request game: %s\n", err)
+			fmt.Fprintf(os.Stderr, "failed to request game: %s\n", err)
 			return
 		}
 		jd := json.NewDecoder(resp.Body)
 		if err := jd.Decode(&gr); err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to decode response: %s\n", err)
+			fmt.Fprintf(os.Stderr, "failed to decode response: %s\n", err)
 			resp.Body.Close()
 			return
 		}
@@ -132,7 +168,7 @@ func main() {
 		// ?request=CheckGameJobStatus&jobId=JoinPlace%3D[id]%3B
 	}
 
-	// Launch game client
+	// Launch game client.
 	{
 		err := exec.Command(player,
 			"--play",
@@ -141,7 +177,7 @@ func main() {
 			"-j", gr.JoinScriptURL,
 		).Start()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to start game client: %s\n", err)
+			fmt.Fprintf(os.Stderr, "failed to start game client: %s\n", err)
 			return
 		}
 	}

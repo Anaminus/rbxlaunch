@@ -26,27 +26,29 @@ Obviously, Roblox should also be installed.
 rbxlaunch is run from a shell.
 
 ```
-rbxlaunch -id PLACEID [ -u USERNAME [ -p PASSWORD ] ]
+rbxlaunch -id PLACEID [ -u USERNAME ]
 ```
 
 The following options are available:
 
-- `-u`: Username to log in with.
-- `-p`: Password to log in with.
 - `-id`: ID of place to join.
+- `-u`: Username to log in with.
 
-If both the username and password are unspecified, then you will join the game
-as a guest.
+Specifying a username prompts you to enter the password of your Roblox user
+account. This is required in order to join the game as a user.
+
+If the username is not specified, then you will join the game as a guest.
 
 ## Examples
 
 Login and enter game:
 
 ```
-rbxlaunch -id 1818 -u AzureDiamond -p hunter2
+rbxlaunch -id 1818 -u Shedletsky
+(prompts for password)
 ```
 
-Enter game as guest:
+Enter game as a guest:
 
 ```
 rbxlaunch -id 1818
