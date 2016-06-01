@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"encoding/xml"
 	"flag"
@@ -12,7 +13,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
+	"strings"
 	"syscall"
 )
 
@@ -97,52 +100,47 @@ type GameRequest struct {
 	AuthenticationTicket string `json:"authenticationTicket"`
 }
 
-func main() {
-	var username string
-	var placeID int
+type State struct {
+	Client *rbxauth.Client
+	Player string
+	Host   string
+}
 
-	// Parse flags.
-	flag.StringVar(&username, "u", "", "Username to login with.")
-	flag.IntVar(&placeID, "id", 0, "ID of place to join.")
-	flag.Parse()
+func (state *State) Message(format string, v ...interface{}) {
+	fmt.Fprintf(os.Stderr, format, v...)
+}
 
-	if placeID == 0 {
-		fmt.Fprintf(os.Stderr, "place ID required (-id)\n")
-		return
+func (state *State) Login(username string) bool {
+	var password []byte
+	var err error
+	state.Message("Enter your password: ")
+	password, err = terminal.ReadPassword(int(syscall.Stdin))
+	state.Message("\n")
+	if err != nil {
+		state.Message("failed to read password: %s\n", err)
+		return false
 	}
-
-	// Find game client.
-	player, host := FindPlayer()
-	if player == "" {
-		fmt.Fprintf(os.Stderr, "failed to locate game client. Make sure Roblox is installed.\n")
-		return
-	}
-
-	// Log in with web client.
-	client := &rbxauth.Client{}
-	if username != "" {
-		var password []byte
-		var err error
-		fmt.Print("Enter your password: ")
-		password, err = terminal.ReadPassword(int(syscall.Stdin))
-		fmt.Println()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "failed to read password: %s\n", err)
-			return
+	if err := state.Client.Login(state.Host, username, password); err != nil {
+		if err == rbxauth.ErrLoggedIn {
+			state.Message("%s\n", err)
+		} else {
+			state.Message("failed to log in: %s\n", err)
 		}
-		if err := client.Login(host, username, password); err != nil {
-			fmt.Fprintf(os.Stderr, "failed to log in: %s\n", err)
-			return
-		}
-		copy(password, make([]byte, len(password)))
+		return false
 	}
+	return true
+}
 
-	// Request game.
+func (state *State) Logout() {
+	state.Client.Logout(state.Host)
+}
+
+func (state *State) Join(placeID int) {
 	gr := GameRequest{}
 	{
 		launchURL := &url.URL{
 			Scheme: "https",
-			Host:   host,
+			Host:   state.Host,
 			Path:   "/game/placelauncher.ashx",
 			RawQuery: url.Values{
 				"request":       []string{"RequestGame"},
@@ -151,14 +149,14 @@ func main() {
 				"gender":        []string{""},
 			}.Encode(),
 		}
-		resp, err := client.Get(launchURL.String())
+		resp, err := state.Client.Get(launchURL.String())
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "failed to request game: %s\n", err)
+			state.Message("failed to request game: %s\n", err)
 			return
 		}
 		jd := json.NewDecoder(resp.Body)
 		if err := jd.Decode(&gr); err != nil {
-			fmt.Fprintf(os.Stderr, "failed to decode response: %s\n", err)
+			state.Message("failed to decode response: %s\n", err)
 			resp.Body.Close()
 			return
 		}
@@ -170,15 +168,195 @@ func main() {
 
 	// Launch game client.
 	{
-		err := exec.Command(player,
+		err := exec.Command(state.Player,
 			"--play",
 			"-a", gr.AuthenticationURL,
 			"-t", gr.AuthenticationTicket,
 			"-j", gr.JoinScriptURL,
 		).Start()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "failed to start game client: %s\n", err)
+			state.Message("failed to start game client: %s\n", err)
 			return
 		}
 	}
+}
+
+func (state *State) Help(cmds Commands, arg string) {
+	if arg == "" {
+		state.Message("Commands:\n")
+		sorted := make([]string, len(cmds))
+		{
+			i := 0
+			for name := range cmds {
+				sorted[i] = name
+				i++
+			}
+		}
+		sort.Strings(sorted)
+
+		for _, name := range sorted {
+			cmd := cmds[name]
+			state.Message("\t%s\t%s\n", name, cmd.Summ)
+		}
+		return
+	}
+
+	if arg == "help" {
+		state.Message("help [command]\n\tDisplay all commands, or details for a specific command.\n")
+		return
+	}
+
+	cmd, ok := cmds[arg]
+	if !ok {
+		state.Message("Unknown command %q\n", arg)
+		return
+	}
+
+	if cmd.Args == "" {
+		state.Message("%s\n\t%s\n", arg, cmd.Desc)
+	} else {
+		desc := strings.Replace(cmd.Desc, "\n", "\n\t", -1)
+		state.Message("%s %s\n\t%s\n", arg, cmd.Args, desc)
+	}
+}
+
+func InteractiveMode(state *State, cmds Commands) {
+	input := bufio.NewReader(os.Stdin)
+	for {
+		state.Message("\nrbxlaunch>")
+		line, _ := input.ReadString('\n')
+		line = strings.TrimSpace(line)
+		i := strings.Index(line, " ")
+		var name, arg string
+		if i == -1 {
+			name = line
+		} else {
+			name, arg = line[:i], strings.TrimSpace(line[i+1:])
+		}
+
+		if name == "" {
+			continue
+		}
+
+		if name == "help" {
+			state.Help(cmds, arg)
+			continue
+		}
+
+		cmd, ok := cmds[name]
+		if !ok {
+			state.Message("Unknown command %q. Type \"help\" for a list of commands.\n", name)
+			continue
+		}
+
+		switch cmd.Func(state, arg) {
+		case -1:
+			// exit
+			return
+		case 0:
+			// success
+		case 1:
+			// failure
+		}
+	}
+}
+
+type Commands map[string]Command
+
+type Command struct {
+	Args string
+	Summ string
+	Desc string
+	Func func(state *State, arg string) int
+}
+
+func main() {
+	var interactive bool
+	var username string
+	var placeID int
+
+	// Parse flags.
+	flag.BoolVar(&interactive, "i", false, "Force interactive mode.")
+	flag.StringVar(&username, "u", "", "Username to login with.")
+	flag.IntVar(&placeID, "id", 0, "ID of place to join.")
+	flag.Parse()
+
+	if len(os.Args) < 2 {
+		interactive = true
+	}
+
+	state := &State{Client: &rbxauth.Client{}}
+
+	// Find game client.
+	state.Player, state.Host = FindPlayer()
+	if state.Player == "" {
+		state.Message("failed to locate game client. Make sure Roblox is installed.\n")
+		return
+	}
+
+	if username != "" {
+		if !state.Login(username) {
+			return
+		}
+	}
+
+	if interactive {
+		InteractiveMode(state, Commands{
+			"exit": Command{
+				Args: "",
+				Summ: "Terminate the program.",
+				Desc: "Terminate the program.",
+				Func: func(state *State, arg string) int {
+					return -1
+				},
+			},
+			"login": Command{
+				Args: "USERNAME",
+				Summ: "Login to a user account.",
+				Desc: "Login to the account of the given username.\nYou will be prompted to enter the account's password.\nThe user session persists until the program terminates.",
+				Func: func(state *State, username string) int {
+					if username == "" {
+						state.Message("username required.\n")
+						return 1
+					}
+					state.Login(username)
+					return 0
+				},
+			},
+			"logout": Command{
+				Args: "",
+				Summ: "Logout the current user.",
+				Desc: "Logout the current user.",
+				Func: func(state *State, arg string) int {
+					state.Logout()
+					return 0
+				},
+			},
+			"join": Command{
+				Args: "ID",
+				Summ: "Join a place.",
+				// Desc: "Join place `ID`.\nIf `JOB` is given, the program attempts to join the associated server.\nIf you are not logged in, you will join as a guest.",
+				Desc: "Join the place of the given ID.\nIf you have not logged in, then you will join as a guest.",
+				Func: func(state *State, arg string) int {
+					var placeID int
+					fmt.Sscan(arg, &placeID)
+					if placeID == 0 {
+						state.Message("valid place ID required.")
+						return 1
+					}
+					state.Join(placeID)
+					return 0
+				},
+			},
+		})
+		return
+	}
+
+	if placeID == 0 {
+		state.Message("place ID required (-id).\n")
+		return
+	}
+
+	// Request game.
+	state.Join(placeID)
 }

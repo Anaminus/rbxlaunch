@@ -26,11 +26,12 @@ Obviously, Roblox should also be installed.
 rbxlaunch is run from a shell.
 
 ```
-rbxlaunch -id PLACEID [ -u USERNAME ]
+rbxlaunch [ -i ] [ -id PLACEID ] [ -u USERNAME ]
 ```
 
 The following options are available:
 
+- `-i`: Force interactive mode.
 - `-id`: ID of place to join.
 - `-u`: Username to log in with.
 
@@ -39,17 +40,35 @@ account. This is required in order to join the game as a user.
 
 If the username is not specified, then you will join the game as a guest.
 
+### Interactive Mode
+
+Specifiying the `-i` option, or no options, will enter interactive mode. This
+provides the convenience of maintaining a user session, so that you only need
+to log in once.
+
+While in interactive mode, you can enter various commands. Type `help` to see
+a list of commands, or `help (command)` for details on a specific command.
+
 ## Examples
 
 Login and enter game:
-
 ```
 rbxlaunch -id 1818 -u Shedletsky
 (prompts for password)
 ```
 
 Enter game as a guest:
-
 ```
 rbxlaunch -id 1818
+```
+
+Enter interactive mode:
+```
+rbxlaunch
+```
+
+Login, then enter interactive mode:
+```
+rbxlaunch -i -u Shedletsky
+(prompts for password)
 ```
